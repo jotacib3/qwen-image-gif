@@ -1,0 +1,30 @@
+[project]
+name = "qwen-image-gif-creator"
+version = "0.1.0"
+description = "AI-powered sequential image editor and animated GIF creator using Qwen-Image-2.1 and ComfyUI"
+readme = "README.md"
+authors = [
+    { name = "Juan Jose", email = "41393022+jotacib3@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "gradio>=5.0.0",
+    "pillow>=10.4.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-mock>=3.17.0",
+    "ruff>=0.17.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
