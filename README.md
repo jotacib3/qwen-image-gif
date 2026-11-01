@@ -5,8 +5,7 @@
 [![Framework: Gradio](https://img.shields.io/badge/UI-Gradio%205-orange.svg)](https://gradio.app/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **An interactive web studio and technical tutorial demonstrating multi-frame AI character animation using Alibaba's Qwen-Image-2.1, ComfyUI, and Pillow.**  
-> *Authored by Juan Jose*
+> An interactive web application demonstrating multi-frame AI animation using Qwen-Image-2.1, ComfyUI, and Pillow.
 
 ---
 
