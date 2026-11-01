@@ -99,7 +99,7 @@ flowchart TD
 ## 📁 Repository Structure
 
 ```
-example-projects/
+qwen-image-gif/
 ├── notebooks/
 │   └── qwen_image_colab_tutorial.ipynb  # Ready-to-run Google Colab workflow
 ├── src/
