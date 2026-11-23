@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import gradio as gr
+from dotenv import load_dotenv
 from PIL import Image
 
 from src.comfy_client import ComfyUIClient, ComfyUIError
@@ -20,12 +21,7 @@ def build_app() -> gr.Blocks:
     """Build and return the Gradio Blocks UI application."""
     default_comfy_url = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
-    custom_css = """
-    .main-container { max-width: 1200px; margin: 0 auto; }
-    .status-badge { font-weight: bold; padding: 4px 8px; border-radius: 4px; }
-    """
-
-    with gr.Blocks(title="Qwen Image 2.1 - Editor & GIF Creator", css=custom_css) as demo:
+    with gr.Blocks(title="Qwen Image 2.1 - Editor & GIF Creator") as demo:
         # State stores
         # invariant_base_image: Always points to the original reference frame
         # accepted_frames: List of approved frames to be compiled into the GIF
@@ -38,9 +34,8 @@ def build_app() -> gr.Blocks:
             # 🎬 Qwen Image 2.1: Image Editor & GIF Creator
             ### Unified Multi-Frame Animation with Single-Reference Invariant Consistency
             
-            This application implements the tutorial architecture for **Qwen-Image-2.1**. 
-            To prevent cumulative visual decay across animation frames, **every modification references 
-            the fixed base image (`<image1>`)** rather than recursively editing previously generated frames.
+            Every frame is generated from the **same fixed base image (`<image1>`)** instead of
+            editing the previous frame, so visual errors never accumulate across the animation.
             """
         )
 
@@ -61,7 +56,9 @@ def build_app() -> gr.Blocks:
                     return "🟢 Online (ComfyUI Reachable)"
                 return "🔴 Offline (Cannot connect to endpoint)"
 
-            check_btn.click(fn=check_backend_status, inputs=[comfy_url_input], outputs=[status_output])
+            check_btn.click(
+                fn=check_backend_status, inputs=[comfy_url_input], outputs=[status_output]
+            )
 
         with gr.Row():
             # Left Column: Invariant Source & Controls
@@ -81,19 +78,19 @@ def build_app() -> gr.Blocks:
                 )
 
                 with gr.Accordion("Sampling Hyperparameters", open=False):
-                    denoise_slider = gr.Slider(
-                        minimum=0.1,
-                        maximum=1.0,
-                        value=0.75,
-                        step=0.05,
-                        label="Denoise Strength (Edit intensity)",
+                    resolution_slider = gr.Slider(
+                        minimum=512,
+                        maximum=2048,
+                        value=1024,
+                        step=32,
+                        label="Edit Resolution (total pixel budget, official default 1024)",
                     )
                     steps_slider = gr.Slider(
-                        minimum=10,
+                        minimum=8,
                         maximum=50,
                         value=25,
                         step=1,
-                        label="Sampling Steps",
+                        label="Sampling Steps (official pipeline uses 40-50)",
                     )
                     seed_input = gr.Number(
                         label="Seed (-1 for random)",
@@ -163,12 +160,14 @@ def build_app() -> gr.Blocks:
             """Sync uploaded image into state."""
             return img
 
-        input_base_image.change(fn=on_image_upload, inputs=[input_base_image], outputs=[state_base_image])
+        input_base_image.change(
+            fn=on_image_upload, inputs=[input_base_image], outputs=[state_base_image]
+        )
 
         def run_generation(
             base_img: Image.Image | None,
             prompt: str,
-            denoise: float,
+            resolution: int,
             steps: int,
             seed: int,
             url: str,
@@ -192,12 +191,12 @@ def build_app() -> gr.Blocks:
                 variant = client.generate_variant(
                     base_image=base_img,
                     edit_prompt=prompt,
-                    denoise=denoise,
-                    steps=steps,
+                    steps=int(steps),
                     seed=actual_seed,
+                    resolution=int(resolution),
                 )
                 return variant, variant
-            except ComfyUIError as e:
+            except (ComfyUIError, TimeoutError) as e:
                 raise gr.Error(f"ComfyUI inference error: {e}") from e
             except Exception as e:
                 raise gr.Error(f"Unexpected generation failure: {e}") from e
@@ -207,7 +206,7 @@ def build_app() -> gr.Blocks:
             inputs=[
                 state_base_image,
                 prompt_input,
-                denoise_slider,
+                resolution_slider,
                 steps_slider,
                 seed_input,
                 comfy_url_input,
@@ -243,7 +242,9 @@ def build_app() -> gr.Blocks:
             max_dim: int,
         ):
             if not frames:
-                raise gr.Error("No frames in timeline to compile. Generate and accept frames first.")
+                raise gr.Error(
+                    "No frames in timeline to compile. Generate and accept frames first."
+                )
 
             output_file = Path("outputs") / "qwen_animation.gif"
             try:
@@ -274,10 +275,11 @@ def build_app() -> gr.Blocks:
 
 def main() -> None:
     """Entry point for running the web application."""
+    load_dotenv()  # reads COMFYUI_URL / HOST / PORT from .env when present
     port = int(os.getenv("PORT", "7860"))
     host = os.getenv("HOST", "0.0.0.0")
 
-    app = build_app()
+    app = build_app()  # built after load_dotenv() so COMFYUI_URL from .env is picked up
     app.launch(server_name=host, server_port=port, share=False)
 
 

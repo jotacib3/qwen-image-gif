@@ -1,4 +1,4 @@
-"""ComfyUI API Client for Qwen-Image-2.1 generation and image editing."""
+"""ComfyUI REST client for Qwen-Image-2.1 image editing."""
 
 from __future__ import annotations
 
@@ -16,6 +16,14 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# workflow_api.json lives at the project root, next to the `src/` package.
+DEFAULT_WORKFLOW_PATH = Path(__file__).resolve().parent.parent / "workflow_api.json"
+
+# Node types of the official Qwen-Image-2.1 edit graph that receive runtime values.
+IMAGE_NODE = "LoadImage"
+ENCODE_NODE = "TextEncodeQwenImage21"
+SAMPLER_NODE = "KSampler"
+
 
 class ComfyUIError(RuntimeError):
     """Raised when communication with ComfyUI API fails."""
@@ -27,7 +35,7 @@ class ComfyUIClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8188",
-        workflow_path: str | Path = "workflow_api.json",
+        workflow_path: str | Path = DEFAULT_WORKFLOW_PATH,
         timeout: int = 180,
     ) -> None:
         """Initialize ComfyUI client.
@@ -89,50 +97,63 @@ class ComfyUIClient:
         except requests.RequestException as e:
             raise ComfyUIError(f"Failed to upload reference image to ComfyUI: {e}") from e
 
+    @staticmethod
+    def _find_node(workflow: dict[str, Any], class_type: str) -> dict[str, Any]:
+        """Return the first node of the given type.
+
+        Nodes are located by `class_type` instead of hard-coded IDs, so any graph exported
+        from ComfyUI with "Export (API)" works as long as it contains these node types.
+        """
+        for node in workflow.values():
+            if isinstance(node, dict) and node.get("class_type") == class_type:
+                return node
+        raise ComfyUIError(
+            f"Workflow has no '{class_type}' node. Export the official Qwen-Image-2.1 "
+            "edit template from ComfyUI in API format (see README)."
+        )
+
     def build_prompt_workflow(
         self,
         image_name: str,
         edit_prompt: str,
-        denoise: float = 0.75,
         steps: int = 25,
         seed: int | None = None,
+        resolution: int | None = None,
     ) -> dict[str, Any]:
-        """Inject runtime arguments into the Qwen-Image-2.1 workflow template.
+        """Inject runtime arguments into the Qwen-Image-2.1 edit workflow template.
 
         Args:
-            image_name: The filename of the uploaded image.
-            edit_prompt: The natural language editing instruction.
-            denoise: Denoising strength for KSampler.
-            steps: Number of sampling steps.
-            seed: Random seed (if None, a random integer is generated).
+            image_name: Filename of the reference image already uploaded to ComfyUI.
+            edit_prompt: Natural language edit instruction.
+            steps: Sampling steps (the official pipeline uses ~40-50; 25 is a faster default).
+            seed: Random seed (a random one is generated when None).
+            resolution: Total pixel budget for the edit (e.g. 1024). Keeps the template value
+                when None.
 
         Returns:
-            Configured workflow dictionary ready for queueing.
+            Configured workflow dictionary ready to be queued.
         """
         workflow = copy.deepcopy(self.workflow_template)
 
-        # Ensure seed is set
         if seed is None:
-            seed = random.randint(1, 10**14)
+            seed = random.randint(1, 2**48)
 
-        # 1. Inject reference image filename in LoadImage node (ID: "2")
-        if "2" in workflow and "inputs" in workflow["2"]:
-            workflow["2"]["inputs"]["image"] = image_name
+        # Reference image -> LoadImage
+        self._find_node(workflow, IMAGE_NODE)["inputs"]["image"] = image_name
 
-        # 2. Inject positive instruction prompt in CLIPTextEncode node (ID: "3")
-        # Format instruction with <image1> tag as required by Qwen-Image-2.1
+        # Instruction -> TextEncodeQwenImage21. Qwen-Image-2.1 refers to inputs as <image1>..<image10>.
         formatted_prompt = edit_prompt.strip()
-        if not formatted_prompt.startswith("<image1>"):
+        if "<image1>" not in formatted_prompt:
             formatted_prompt = f"<image1> {formatted_prompt}"
+        encode_inputs = self._find_node(workflow, ENCODE_NODE)["inputs"]
+        encode_inputs["prompt"] = formatted_prompt
+        if resolution is not None:
+            encode_inputs["resolution"] = int(resolution)
 
-        if "3" in workflow and "inputs" in workflow["3"]:
-            workflow["3"]["inputs"]["text"] = formatted_prompt
-
-        # 3. Inject sampler parameters in KSampler node (ID: "6")
-        if "6" in workflow and "inputs" in workflow["6"]:
-            workflow["6"]["inputs"]["seed"] = seed
-            workflow["6"]["inputs"]["steps"] = steps
-            workflow["6"]["inputs"]["denoise"] = denoise
+        # Sampler parameters -> KSampler
+        sampler_inputs = self._find_node(workflow, SAMPLER_NODE)["inputs"]
+        sampler_inputs["seed"] = seed
+        sampler_inputs["steps"] = int(steps)
 
         return workflow
 
@@ -150,6 +171,9 @@ class ComfyUIClient:
 
         try:
             resp = requests.post(url, json=payload, timeout=30)
+            if resp.status_code == 400:
+                # ComfyUI validates the graph up front (missing weights, unknown nodes, ...)
+                raise ComfyUIError(f"ComfyUI rejected the workflow: {resp.text[:500]}")
             resp.raise_for_status()
             data = resp.json()
             if "prompt_id" not in data:
@@ -180,6 +204,12 @@ class ComfyUIClient:
                     history = resp.json()
                     if prompt_id in history:
                         item = history[prompt_id]
+                        status = item.get("status", {})
+                        if status.get("status_str") == "error":
+                            raise ComfyUIError(
+                                f"ComfyUI failed to execute prompt {prompt_id}: "
+                                f"{self._describe_error(status)}"
+                            )
                         outputs = item.get("outputs", {})
                         images = []
                         for node_output in outputs.values():
@@ -195,6 +225,15 @@ class ComfyUIClient:
         raise TimeoutError(
             f"Generation timed out after {self.timeout}s waiting for prompt {prompt_id}."
         )
+
+    @staticmethod
+    def _describe_error(status: dict[str, Any]) -> str:
+        """Extract a readable message from a ComfyUI history `status` block."""
+        for message_type, payload in status.get("messages", []):
+            if message_type == "execution_error" and isinstance(payload, dict):
+                node = payload.get("node_type", "unknown node")
+                return f"{node}: {payload.get('exception_message', 'unknown error')}".strip()
+        return "unknown error (check the ComfyUI console)"
 
     def fetch_image(
         self, filename: str, subfolder: str = "", folder_type: str = "output"
@@ -223,18 +262,18 @@ class ComfyUIClient:
         self,
         base_image: Image.Image,
         edit_prompt: str,
-        denoise: float = 0.75,
         steps: int = 25,
         seed: int | None = None,
+        resolution: int | None = None,
     ) -> Image.Image:
-        """High-level method to run full single-reference editing pipeline.
+        """High-level method to run the full single-reference editing pipeline.
 
         Args:
             base_image: Original fixed reference image.
             edit_prompt: Natural language modification instructions.
-            denoise: Denoise factor (0.1 = subtle changes, 0.9 = strong changes).
             steps: Diffusion sampling steps.
             seed: Sampling seed.
+            resolution: Total pixel budget for the edit.
 
         Returns:
             Generated modified PIL Image.
@@ -246,9 +285,9 @@ class ComfyUIClient:
         workflow = self.build_prompt_workflow(
             image_name=image_name,
             edit_prompt=edit_prompt,
-            denoise=denoise,
             steps=steps,
             seed=seed,
+            resolution=resolution,
         )
 
         logger.info("Queueing generation task...")

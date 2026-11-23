@@ -1,122 +1,78 @@
 {
   "1": {
     "inputs": {
-      "ckpt_name": "qwen_image_2.1.safetensors"
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
     },
-    "class_type": "CheckpointLoaderSimple",
-    "_meta": {
-      "title": "Load Checkpoint (Qwen-Image-2.1)"
-    }
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model (Qwen-Image-2.1)" }
   },
   "2": {
     "inputs": {
-      "image": "base_input.png",
-      "upload": "image"
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
     },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Reference Image (<image1>)"
-    }
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load Text Encoder (Qwen3-VL 8B)" }
   },
   "3": {
     "inputs": {
-      "text": "<image1> Change expression to a gentle smile, preserve lighting and background",
-      "clip": [
-        "1",
-        1
-      ]
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
     },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "Positive Edit Prompt"
-    }
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
   },
   "4": {
     "inputs": {
-      "text": "blurry, low quality, artifacts, distorted anatomy, oversaturated",
-      "clip": [
-        "1",
-        1
-      ]
+      "image": "base_reference.png",
+      "upload": "image"
     },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "Negative Prompt"
-    }
+    "class_type": "LoadImage",
+    "_meta": { "title": "Reference Image (<image1>)" }
   },
   "5": {
     "inputs": {
-      "pixels": [
-        "2",
-        0
-      ],
-      "vae": [
-        "1",
-        2
-      ]
+      "prompt": "<image1> Change the expression to a gentle smile, keep lighting and background unchanged",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "clip": ["2", 0],
+      "vae": ["3", 0],
+      "images.image_1": ["4", 0]
     },
-    "class_type": "VAEEncode",
-    "_meta": {
-      "title": "VAE Encode Reference Image"
-    }
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": { "title": "Text Encode Qwen Image 2.1 (edit)" }
   },
   "6": {
     "inputs": {
       "seed": 42,
       "steps": 25,
-      "cfg": 7.0,
+      "cfg": 1.0,
       "sampler_name": "euler",
-      "scheduler": "normal",
-      "denoise": 0.75,
-      "model": [
-        "1",
-        0
-      ],
-      "positive": [
-        "3",
-        0
-      ],
-      "negative": [
-        "4",
-        0
-      ],
-      "latent_image": [
-        "5",
-        0
-      ]
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["5", 0],
+      "negative": ["5", 1],
+      "latent_image": ["5", 2]
     },
     "class_type": "KSampler",
-    "_meta": {
-      "title": "KSampler (Inference)"
-    }
+    "_meta": { "title": "KSampler" }
   },
   "7": {
     "inputs": {
-      "samples": [
-        "6",
-        0
-      ],
-      "vae": [
-        "1",
-        2
-      ]
+      "samples": ["6", 0],
+      "vae": ["3", 0]
     },
     "class_type": "VAEDecode",
-    "_meta": {
-      "title": "VAE Decode Output"
-    }
+    "_meta": { "title": "VAE Decode" }
   },
   "8": {
     "inputs": {
       "filename_prefix": "Qwen_Edit_Frame",
-      "images": [
-        "7",
-        0
-      ]
+      "images": ["7", 0]
     },
     "class_type": "SaveImage",
-    "_meta": {
-      "title": "Save Output Image"
-    }
+    "_meta": { "title": "Save Image" }
   }
 }

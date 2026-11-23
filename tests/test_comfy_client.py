@@ -8,7 +8,7 @@ import pytest
 import requests
 from PIL import Image
 
-from src.comfy_client import ComfyUIClient
+from src.comfy_client import ComfyUIClient, ComfyUIError
 
 
 @pytest.fixture
@@ -17,10 +17,10 @@ def dummy_workflow_path(tmp_path: Path) -> Path:
     wf_path = tmp_path / "mock_workflow.json"
     wf_path.write_text(
         """{
-        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "qwen.safetensors"}},
-        "2": {"class_type": "LoadImage", "inputs": {"image": "old.png"}},
-        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "default prompt"}},
-        "6": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20, "denoise": 0.7}}
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen.safetensors"}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": "old.png"}},
+        "5": {"class_type": "TextEncodeQwenImage21", "inputs": {"prompt": "x", "resolution": 1024}},
+        "6": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 20, "cfg": 1.0}}
     }"""
     )
     return wf_path
@@ -34,26 +34,44 @@ def test_missing_workflow_raises_filenotfound() -> None:
 
 
 def test_build_prompt_workflow_injection(dummy_workflow_path: Path) -> None:
-    """Verify parameters and <image1> tag are properly injected into the workflow graph."""
+    """Parameters and the <image1> tag are injected into the nodes found by class_type."""
     client = ComfyUIClient(workflow_path=dummy_workflow_path)
     wf = client.build_prompt_workflow(
         image_name="test_reference.png",
         edit_prompt="Raise both arms in victory",
-        denoise=0.85,
         steps=30,
         seed=12345,
+        resolution=768,
     )
 
-    # Node 2: Image name
-    assert wf["2"]["inputs"]["image"] == "test_reference.png"
-
-    # Node 3: Prompt prepended with <image1>
-    assert wf["3"]["inputs"]["text"] == "<image1> Raise both arms in victory"
-
-    # Node 6: Sampler parameters
+    assert wf["4"]["inputs"]["image"] == "test_reference.png"
+    assert wf["5"]["inputs"]["prompt"] == "<image1> Raise both arms in victory"
+    assert wf["5"]["inputs"]["resolution"] == 768
     assert wf["6"]["inputs"]["seed"] == 12345
     assert wf["6"]["inputs"]["steps"] == 30
-    assert wf["6"]["inputs"]["denoise"] == 0.85
+    assert wf["6"]["inputs"]["cfg"] == 1.0  # untouched template value
+
+
+def test_build_prompt_workflow_keeps_existing_image_tag(dummy_workflow_path: Path) -> None:
+    """A prompt that already references <image1> is not prefixed twice."""
+    client = ComfyUIClient(workflow_path=dummy_workflow_path)
+    wf = client.build_prompt_workflow(image_name="a.png", edit_prompt="Make <image1> wave")
+    assert wf["5"]["inputs"]["prompt"] == "Make <image1> wave"
+
+
+def test_build_prompt_workflow_missing_node_raises(tmp_path: Path) -> None:
+    """A graph without the Qwen-Image-2.1 encode node fails with an actionable error."""
+    wf_path = tmp_path / "old_workflow.json"
+    wf_path.write_text('{"2": {"class_type": "LoadImage", "inputs": {"image": "x.png"}}}')
+    client = ComfyUIClient(workflow_path=wf_path)
+    with pytest.raises(ComfyUIError, match="TextEncodeQwenImage21"):
+        client.build_prompt_workflow(image_name="a.png", edit_prompt="smile")
+
+
+def test_bundled_workflow_is_valid() -> None:
+    """The workflow shipped in the repo contains every node the client needs."""
+    wf = ComfyUIClient().build_prompt_workflow(image_name="a.png", edit_prompt="smile", seed=1)
+    assert any(n["class_type"] == "TextEncodeQwenImage21" for n in wf.values())
 
 
 def test_check_connection_online(dummy_workflow_path: Path) -> None:
@@ -104,11 +122,7 @@ def test_wait_for_completion(dummy_workflow_path: Path) -> None:
     mock_history_response = {
         "uuid-1234": {
             "outputs": {
-                "8": {
-                    "images": [
-                        {"filename": "out_0001.png", "subfolder": "", "type": "output"}
-                    ]
-                }
+                "8": {"images": [{"filename": "out_0001.png", "subfolder": "", "type": "output"}]}
             }
         }
     }
@@ -137,3 +151,27 @@ def test_fetch_image(dummy_workflow_path: Path) -> None:
         img = client.fetch_image(filename="out_0001.png")
         assert isinstance(img, Image.Image)
         assert img.size == (64, 64)
+
+
+def test_wait_for_completion_surfaces_execution_error(dummy_workflow_path: Path) -> None:
+    """A failed execution raises immediately instead of polling until the timeout."""
+    client = ComfyUIClient(base_url="http://fake-host:8188", workflow_path=dummy_workflow_path)
+    history = {
+        "uuid-err": {
+            "status": {
+                "status_str": "error",
+                "messages": [
+                    [
+                        "execution_error",
+                        {"node_type": "UNETLoader", "exception_message": "file not found"},
+                    ]
+                ],
+            },
+            "outputs": {},
+        }
+    }
+    with patch("requests.get") as mock_get:
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = history
+        with pytest.raises(ComfyUIError, match="UNETLoader: file not found"):
+            client.wait_for_completion(prompt_id="uuid-err")
