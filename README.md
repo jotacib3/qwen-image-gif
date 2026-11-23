@@ -1,193 +1,109 @@
-# 🎬 Qwen-Image-2.1: Image Editor & Animated GIF Creator
+# Qwen-Image-2.1 GIF Creator
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![Framework: Gradio](https://img.shields.io/badge/UI-Gradio%205-orange.svg)](https://gradio.app/)
+[![UI: Gradio](https://img.shields.io/badge/UI-Gradio-orange.svg)](https://gradio.app/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> An interactive web application demonstrating multi-frame AI animation using Qwen-Image-2.1, ComfyUI, and Pillow.
+A Gradio app that turns one photo into an animated GIF. You describe each frame in plain language ("turn the head to the right", "smile"), [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1) edits the photo through a ComfyUI backend, and Pillow assembles the frames you keep into an optimized GIF.
 
----
+![App screenshot](docs/screenshot.png)
 
-## 📖 Theoretical Foundation & Core Problem
+## The idea: never edit an edit
 
-Generating sequential animation frames or dynamic GIFs using generative diffusion models typically presents a critical technical hurdle known as **Cumulative Visual Degradation**.
+The naive way to animate with an image editor is to chain it: edit frame 1 to get frame 2, edit frame 2 to get frame 3, and so on. Every pass adds a little diffusion noise, so faces, textures and backgrounds drift and degrade within a few frames.
 
-### The Problem: Recursive Chaining
-In a naive recursive approach, each newly generated frame $F_{t}$ is fed as the input image to synthesize $F_{t+1}$:
-
-```
-Base Image F0 ──► Edit 1 ──► Frame F1 ──► Edit 2 ──► Frame F2 ──► Edit 3 ──► Frame F3 (Artifacts accumulated)
-```
-
-With each generation step, diffusion noise and minor anatomical distortions compound. By frame 3 or 4, facial structures, textures, and background elements suffer from severe hallucination and degeneration.
-
-### The Solution: Single-Reference Invariant Architecture
-This project implements the **Single-Reference Invariant Pattern**. Rather than chaining frames recursively, **the original base image $F_{0}$ remains permanently anchored** as the sole reference input (`<image1>`):
+This app uses a **single fixed reference** instead. Every frame is generated from the **original** photo (`<image1>`) with a different instruction:
 
 ```
-                       ┌──► Prompt 1 ──► Candidate F1 (Pose 1)
-                       │
-Base Reference Frame F0 ──► Prompt 2 ──► Candidate F2 (Pose 2) ──► Assemble with Pillow ──► Animated GIF
-                       │
-                       └──► Prompt 3 ──► Candidate F3 (Pose 3)
+                 ┌─► "slight smile"          ─► frame 1 ─┐
+original photo ──┼─► "big smile, head right" ─► frame 2 ─┼─► Pillow ─► animated GIF
+   (<image1>)    └─► "back to neutral"       ─► frame 3 ─┘
 ```
 
-Every candidate frame preserves pristine background fidelity, consistent clothing details, and uniform lighting, yielding fluid, artifact-free animated loops.
+Errors never compound, because no frame is built on top of another.
 
----
-
-## 🏛️ System Architecture
+## How it works
 
 ```mermaid
-flowchart TD
-    subgraph UI ["Gradio Frontend Layer"]
-        A["Base Image Upload (<image1>)"]
-        B["Edit Instruction (Prompt)"]
-        C["Candidate Preview"]
-        D["Timeline Gallery"]
-        E["GIF Compilation Controls"]
-    end
-
-    subgraph Core ["Application Core"]
-        App["src/app.py (State Manager)"]
-        GifEngine["src/gif_engine.py (Pillow Optimization)"]
-    end
-
-    subgraph BackendClient ["Inference Client"]
-        Client["src/comfy_client.py (REST API)"]
-        Workflow["workflow_api.json (Graph Template)"]
-    end
-
-    subgraph Execution ["Inference Engine (Local / Remote / Colab)"]
-        Comfy["ComfyUI Server (:8188)"]
-        Model["Qwen-Image-2.1 Checkpoint (~7B DiT)"]
-    end
-
-    A --> App
-    B --> App
-    App --> Client
-    Client --> Workflow
-    Client -->|HTTP POST /prompt| Comfy
-    Comfy --> Model
-    Comfy -->|Polling /history & /view| Client
-    Client --> C
-    C -->|Accept Frame| D
-    D --> GifEngine
-    E --> GifEngine
-    GifEngine -->|Export .gif| App
+flowchart LR
+    UI["Gradio UI<br/>src/app.py"] -->|reference image + prompt| Client["ComfyUI client<br/>src/comfy_client.py"]
+    Client -->|POST /upload/image, /prompt| Comfy["ComfyUI + Qwen-Image-2.1<br/>(local GPU or Colab)"]
+    Comfy -->|poll /history, GET /view| Client
+    Client -->|candidate frame| UI
+    UI -->|accepted frames| GIF["GIF engine<br/>src/gif_engine.py"]
 ```
 
----
+- **`src/comfy_client.py`**: uploads the reference image, fills the `workflow_api.json` template, queues it, polls until it finishes and downloads the result. It finds nodes by type (`LoadImage`, `TextEncodeQwenImage21`, `KSampler`), not by hard-coded IDs, so a graph re-exported from ComfyUI still works. ComfyUI execution errors (a missing weight file, for example) are reported right away instead of after the timeout.
+- **`src/gif_engine.py`**: normalizes frame sizes, optionally downscales, adds a ping-pong (boomerang) loop and quantizes each frame to an adaptive 256-color palette.
+- **`src/app.py`**: the review loop. Generate a candidate, accept or discard it, then compile the accepted frames.
+- **`workflow_api.json`**: the official Qwen-Image-2.1 *image edit* graph in ComfyUI API format (`UNETLoader` + `CLIPLoader` + `VAELoader` + `TextEncodeQwenImage21` + `KSampler`, cfg 1, euler/simple), without the optional prompt enhancer.
 
-## ✨ Features
+## Quick start
 
-- **Decoupled Architecture:** Clean client-server separation. The Python UI runs locally in milliseconds, communicating with any ComfyUI instance (local machine, Google Colab, or cloud GPU).
-- **Interactive Staging Workflow:**
-  1. Inspect generated candidates in a dedicated comparison viewer.
-  2. Selectively **Accept** frames into the timeline or **Discard** unwanted variations.
-  3. Real-time timeline gallery showing the sequence progression.
-- **High-Performance GIF Engine (`src/gif_engine.py`):**
-  - **Adaptive Color Quantization:** 256-color adaptive palette conversion prevents GIF dithering artifacts.
-  - **Ping-Pong Loop Mode:** Seamless back-and-forth bounce animation.
-  - **Granular FPS Control:** Configurable frame durations (1 to 30 FPS).
-  - **Proportional Downscaling:** Optional dimension capping for Discord/web-friendly file sizes.
-- **Full Type Safety & Unit Testing:** Built with Python 3.12, strict type hints, and 100% test coverage on critical utilities.
+Requires [uv](https://docs.astral.sh/uv/).
 
----
-
-## 📁 Repository Structure
-
-```
-qwen-image-gif/
-├── notebooks/
-│   └── qwen_image_colab_tutorial.ipynb  # Ready-to-run Google Colab workflow
-├── src/
-│   ├── __init__.py
-│   ├── app.py                          # Gradio UI & timeline state management
-│   ├── comfy_client.py                 # REST client for ComfyUI API
-│   └── gif_engine.py                   # Pillow animation assembly & optimization
-├── tests/
-│   ├── __init__.py
-│   ├── test_comfy_client.py            # Unit tests for ComfyUI payload injection
-│   └── test_gif_engine.py              # Unit tests for GIF creation & transformations
-├── workflow_api.json                   # Exported ComfyUI graph for Qwen-Image-2.1
-├── main.py                             # Application entrypoint
-├── pyproject.toml                      # Project metadata & dependencies (uv)
-├── .python-version                     # Python 3.12 pinning
-├── .env.example                        # Environment variables template
-└── README.md                           # Documentation & technical guide
-```
-
----
-
-## 🚀 Getting Started
-
-### 1. Prerequisites
-Ensure you have [`uv`](https://docs.astral.sh/uv/) installed:
 ```bash
-# On Linux / macOS:
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### 2. Installation
-Clone this repository and install dependencies inside a sandboxed virtual environment:
-```bash
-# Synchronize environment and install dependencies
 uv sync
+cp .env.example .env      # set COMFYUI_URL if your backend is not on 127.0.0.1:8188
+uv run python main.py     # http://localhost:7860
 ```
 
-### 3. Configuration
-Copy the sample environment file:
+The UI works without a backend. You need ComfyUI with Qwen-Image-2.1 to generate frames.
+
+## Backend: ComfyUI + Qwen-Image-2.1
+
+You can run the backend on your own GPU or on Colab.
+
+**Option A: Google Colab.** Open [`notebooks/qwen_image_colab_tutorial.ipynb`](notebooks/qwen_image_colab_tutorial.ipynb) in Colab. It installs ComfyUI, downloads the weights, and opens a Cloudflare tunnel. Paste the tunnel URL into **Backend Configuration** in the app.
+
+**Option B: local GPU.** Install [ComfyUI](https://github.com/comfyanonymous/ComfyUI) **0.37.0 or newer**, download these files from [`Comfy-Org/Qwen-Image-2.1`](https://huggingface.co/Comfy-Org/Qwen-Image-2.1), and start it with `python main.py --listen`.
+
+| File | Folder | Size |
+| --- | --- | --- |
+| `qwen_image_2.1_int8_convrot.safetensors` | `models/diffusion_models/` | 6.8 GB |
+| `qwen3vl_8b_int8_convrot.safetensors` | `models/text_encoders/` | 8.7 GB |
+| `qwen_image_2.1_vae_bf16.safetensors` | `models/vae/` | 0.6 GB |
+
+The `*_bf16` variants give higher quality on larger GPUs. If you use them, update the file names in `workflow_api.json`.
+
+### Generation settings
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Steps | 25 | The official pipeline uses 40-50 with euler. 25 is a faster default. |
+| Edit resolution | 1024 | Total pixel budget, not width or height. The model supports up to 2048. |
+| Seed | random | Set a fixed seed to reproduce a frame. |
+
+Prompts refer to the reference image as `<image1>`. The client adds the tag automatically if you leave it out.
+
+## Development
+
 ```bash
-cp .env.example .env
-```
-
-Configure your ComfyUI address in `.env` (default is `http://127.0.0.1:8188`):
-```ini
-COMFYUI_URL=http://127.0.0.1:8188
-PORT=7860
-HOST=0.0.0.0
-```
-
----
-
-## 💻 Running the Application
-
-Launch the local web server:
-```bash
-uv run python main.py
-```
-
-Open your browser at `http://localhost:7860`.
-
-### Connecting to GPU Inference:
-1. **Local ComfyUI:** If you have an NVIDIA GPU with 16GB+ VRAM, launch ComfyUI locally with `--listen 0.0.0.0`.
-2. **Google Colab (Free or Pro):** Open [`notebooks/qwen_image_colab_tutorial.ipynb`](notebooks/qwen_image_colab_tutorial.ipynb) in Colab. Run the ComfyUI background cell and Cloudflare tunnel, then paste the public URL into the **Backend Configuration** section in the Gradio web UI.
-
----
-
-## 🧪 Testing & Code Quality
-
-Run automated unit tests:
-```bash
-uv run pytest -v
-```
-
-Run code formatting and linting checks:
-```bash
+uv run pytest -v          # unit tests (ComfyUI HTTP calls are mocked; no GPU needed)
 uv run ruff check .
+uv run ruff format --check .
 ```
 
----
+## Project structure
 
-## 🗺️ Roadmap & Extensions
+```
+├── main.py                 # entry point
+├── workflow_api.json       # Qwen-Image-2.1 edit graph (ComfyUI API format)
+├── src/
+│   ├── app.py              # Gradio UI and timeline state
+│   ├── comfy_client.py     # ComfyUI REST client
+│   └── gif_engine.py       # GIF assembly with Pillow
+├── tests/                  # pytest suite
+└── notebooks/              # Colab backend setup
+```
 
-- [ ] **Gradio Client / Hugging Face Spaces Bridge:** Add direct connector to public Hugging Face ZeroGPU demos without self-hosting ComfyUI.
-- [ ] **Latent Blending / Frame Interpolation:** Implement RIFE or frame morphing between adjacent keyframes for 60 FPS ultra-smooth playback.
-- [ ] **Interactive Mask Inpainting:** Add canvas drawing tools in Gradio to isolate specific editing regions (e.g. modifying only the subject's hand or mouth).
+## Limitations
 
----
+- Generation quality depends on the prompt. Small, concrete changes ("tilt the head slightly left") animate better than big scene changes.
+- Each frame is an independent edit, so consecutive frames are not interpolated. Use more frames or a higher FPS for smoother motion.
+- The tests cover the client and the GIF engine with mocked HTTP. Running an actual generation needs a GPU backend.
 
-## 📄 License
-This project is open-source under the [MIT License](LICENSE).
+## License
+
+The code is MIT-licensed (see [LICENSE](LICENSE)). The Qwen-Image-2.1 weights are distributed separately under the **Qwen Research License**. Check its terms before any commercial use.

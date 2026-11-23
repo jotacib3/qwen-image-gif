@@ -39,6 +39,7 @@ outputs/
 *.jpeg
 !assets/*.png
 !assets/*.jpg
+!docs/*.png
 
 # Environment & Secrets
 .env
